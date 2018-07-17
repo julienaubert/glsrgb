@@ -1,0 +1,43 @@
+This code aims to show a defect in sRGB framebuffer handling.
+
+License:
+- MIT (see LICENSE)
+- glad files: see https://github.com/Dav1dde/glad/issues/101)
+
+What the code does:
+- Creates a GL or a GLES2 context, the default framebuffer
+  is requested to be GLX_FRAMEBUFFER_SRGB_CAPABLE_EXT
+- Creates an sRGB texture, all texels = (R=1,G=1,B=1,A=255)
+- The default framebuffer is cleared to black, and
+  a quad draws the sRGB texture to the default framebuffer
+
+Expect to see: a dark-grey quad against a black background.
+
+Result:
+- OK when context: 4.6.0 NVIDIA 396.24
+- FAIL when context: OpenGL ES 3.2 NVIDIA 396.24
+  the dark-grey quad is not shown, only black.
+
+Another issue was noted, applies to both 4.6 and ES 3.2:
+- querying GL_FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING on
+  default buffer always gives linear
+
+To compile and run:
+- ./build_gl_srgb.sh && ./gl_srgb
+- ./build_gles_srgb.sh && ./gles_srgb
+
+Related references:
+- https://devtalk.nvidia.com/default/topic/776591/?comment=5216390
+
+
+License:
+
+The following were generated at: http://glad.dav1d.de
+glad-es2+srgb
+glad-glx-1.4
+glad-es2+srgb
+glad-glx-1.4
+For license, see https://github.com/Dav1dde/glad/issues/101
+
+The remaining code is under MIT license, see LICENSE
+
