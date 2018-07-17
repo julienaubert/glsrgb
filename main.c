@@ -45,46 +45,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-//#include <dlfcn.h>
+#include <math.h>
 #include <X11/X.h>
 #include <X11/Xlib.h>
 #include "gl_compile.h"
 #include "gl_error.h"
-
-/*
-static void *glx_lib = 0;
-static void *glx_GetProcAddress = 0;
-static void *glx_GetProcAddressARB = 0;
-
-
-void *getProcAddressGLX(char const * const name)
-{
-    if (!glx_lib) {
-        glx_lib = dlopen("libGL.so.1", RTLD_GLOBAL);
-        if (!glx_lib) glx_lib = dlopen("libGL.so", RTLD_GLOBAL);
-        if (glx_lib) glx_GetProcAddress = dlsym(glx_lib, "glXGetProcAddress");
-        if (glx_lib) glx_GetProcAddressARB = dlsym(glx_lib, "glXGetProcAddressARB");
-    }
-    if (!glx_lib) {
-        fprintf(stderr, "dlopen failed, tried libGL.so.1 and libGL.so\n");
-        exit(1);
-    }
-    if (glx_GetProcAddress) {
-        return glx_GetProcAddress(name);
-    }
-    if (glx_GetProcAddressARB) {
-        return glx_GetProcAddressARB(name);
-    }
-    return dlsym(glx_lib, name);
-}
-
-
-void *get_proc(char const * const name) {
-    void *f = getProcAddressGLX((GLubyte*)name);
-    fprintf(stderr, "%s: %p\n", name, f);
-    if (!f) exit(1);
-    return f;
-}*/
 
 struct glx_handles {
     Display *dpy;
@@ -208,14 +173,28 @@ struct quadtest {
     GLuint position_index;
     GLuint uv_index;
     GLint texture_location;
+    GLint ramp_location;
+    GLint offset_location;
+    GLint scale_location;
     GLuint vertex_array;
     GLuint vertex_buffer;
-    GLuint texture;
     int vertices_count;
 };
 
+GLuint create_a_texture(uint8_t *pixels, int width, int height) {
+    GLuint texture = 0;
+    glGenTextures(1, &texture); CHECK_GL();
+    glBindTexture(GL_TEXTURE_2D, texture); CHECK_GL();
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_ALPHA, width, height, 0, GL_ALPHA, GL_UNSIGNED_BYTE, pixels); CHECK_GL();
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    return texture;
+}
 
-GLuint load_srgb8_a8_texture(uint8_t *pixels, int width, int height) {
+GLuint create_srgb8_a8_texture(uint8_t *pixels, int width, int height) {
     GLuint texture = 0;
     glGenTextures(1, &texture); CHECK_GL();
     glBindTexture(GL_TEXTURE_2D, texture); CHECK_GL();
@@ -255,36 +234,12 @@ void fix_shader(char *dst, size_t dst_size, GLint major, char const *src) {
     //fprintf(stderr, "post: \n%s\n", dst);
 }
 
-void quadtest_setup(GLint major, struct quadtest *test) {
+void quadtest_setup(GLint major, struct quadtest *test, char const *vsh_es2, char const *fsh_es2) {
     char vsh[1000];
     major = 2;
-    fix_shader(vsh, 1000, major, ""
-        " #version 100 //\n"
-        " varying in vec2 position;"
-        " in vec2 uv;"
-        " varying out lowp vec2 f_uv;"
-        " void main() {"
-        "     vec4 pos;"
-        "     pos.xy = position;"
-        "     pos.z = 0.0;"
-        "     pos.w = 1.0;"
-        "     gl_Position = pos;"
-        "     f_uv = uv;"
-        " }");
+    fix_shader(vsh, 1000, major, vsh_es2);
     char fsh[1000];
-    fix_shader(fsh, 1000, major, ""
-        " #version 100 //\n"
-        " uniform lowp sampler2D tex;"
-        " in lowp vec2 f_uv;"
-        " varying out lowp vec4 fragmentColor;"
-        " precision mediump float;"
-        " void main() {"
-        "     vec4 tx = texture2D(tex, f_uv);" // GLES3: texture
-        // NOTE: texture is assumed to be premultiplied alpha
-        //"     fragmentColor.rgb = tx.rgb * 8.0;"
-        "     fragmentColor.rgb = tx.rgb;"
-        "     fragmentColor.a = tx.a;"
-        " }");
+    fix_shader(fsh, 1000, major, fsh_es2);
     GLuint vert_shader = 0;
     GLuint frag_shader = 0;
     if (gl_compile_program_start(vsh, fsh, &test->program, &vert_shader, &frag_shader)) {
@@ -299,6 +254,9 @@ void quadtest_setup(GLint major, struct quadtest *test) {
     }
     CHECK_GL();
     test->texture_location = glGetUniformLocation(test->program, "tex"); CHECK_GL();
+    test->ramp_location = glGetUniformLocation(test->program, "ramp"); CHECK_GL();
+    test->offset_location = glGetUniformLocation(test->program, "offset"); CHECK_GL();
+    test->scale_location = glGetUniformLocation(test->program, "scale"); CHECK_GL();
     glGenVertexArrays(1, &test->vertex_array); CHECK_GL();
     glBindVertexArray(test->vertex_array); CHECK_GL();
     glGenBuffers(1, &test->vertex_buffer); CHECK_GL();
@@ -306,8 +264,6 @@ void quadtest_setup(GLint major, struct quadtest *test) {
     size_t vertex_byte_count = 4 * sizeof (GLfloat);
     size_t vertices_count = 6;
     test->vertices_count = vertices_count;
-    GLfloat scale[] = {0.5, 0.5};
-    GLfloat p[] = {0, 0};
     // ab
     // cd
     // (acb bcd)
@@ -319,52 +275,93 @@ void quadtest_setup(GLint major, struct quadtest *test) {
         -1.f, -1.f,     0.f, 1.f,   // c
         -1.f,  1.f,     0.f, 0.f    // d
     };
-    for (int i = 0; i < vertices_count; ++i) {
-        float x = vertices_xy_uv[i*4+0];
-        float y = vertices_xy_uv[i*4+1];
-        vertices_xy_uv[i*4+0] = x * scale[0] + p[0];
-        vertices_xy_uv[i*4+1] = y * scale[1] + p[1];
-    }
     glBufferData(GL_ARRAY_BUFFER, vertices_count * vertex_byte_count, vertices_xy_uv, GL_STATIC_DRAW); CHECK_GL();
     glEnableVertexAttribArray(test->position_index); CHECK_GL();
     glVertexAttribPointer(test->position_index, 2, GL_FLOAT, GL_FALSE, vertex_byte_count, 0); CHECK_GL();
     glEnableVertexAttribArray(test->uv_index); CHECK_GL();
     glVertexAttribPointer(test->uv_index, 2, GL_FLOAT, GL_FALSE, vertex_byte_count, (void *)(2*sizeof (GL_FLOAT))); CHECK_GL();
-    // load a texture in sRGB with the lowest value possible (=1) that is 0 in linear
-    // if render additive many of these, eg 12, then will be visible
-    uint32_t width = 4;
-    uint32_t height = 4;
+}
+
+float linear_to_srgb(float linear) {
+    // https://www.khronos.org/registry/OpenGL/extensions/EXT/EXT_sRGB.txt
+    double cl = linear;
+    if (isnan(cl)) return 0.0;
+    if (cl > 1.0) return 1.0;
+    if (cl <= 0.0) return 0.0;
+    if (cl < 0.0031308) return 12.92 * cl;
+    if (cl < 1) return 1.055 * pow(cl, 0.41666) - 0.055;
+    return 1;
+}
+
+float srgb_to_linear(float srgb) {
+    // see: https://en.wikipedia.org/wiki/SRGB
+    // https://www.khronos.org/registry/OpenGL/extensions/EXT/EXT_sRGB.txt
+    double cs = srgb;
+    if (cs < 0) cs = 0;
+    if (cs > 1) cs = 1;
+    if (cs <= 0.04045) return cs / 12.92;
+    return pow((cs + 0.055)/1.055, 2.4);
+}
+
+GLuint create_a_texture_srgb_ramp() {
+    // 1/255 is smallest value in sRGB format
+    // in linear, that value is lmin=1/255/12.92
+    // lmin must map to nonzero when we lookup
+    // lmin in the srgb ramp
+    // so we need 1/lmin = 3066 at minimum.
+    // due to rounding/precision, 3277 is minimum
+    // make that 4096
+    int range = 4096;
+    int width = range;
+    int height = 1;
+    uint8_t pixels[width*height];
+    for (int i = 0; i < range; ++i) {
+        float cl = (i+0.5)/(float)(range - 1);
+        float cs = linear_to_srgb(cl);
+        pixels[i] = cs*255.0;
+    }
+    for (int i = 0; i < range; ++i) {
+        fprintf(stderr, "linear: %d srgb: %d back to linear: %d\n", i, pixels[i], (uint8_t)(255.0*srgb_to_linear(pixels[i]/255.0)));
+    }
+    return create_a_texture(pixels, width, height);
+}
+
+GLuint create_srgb8_a8_texture_grey_pma(int width, int height, uint8_t grey, uint8_t alpha) {
     size_t rowbytes = width*4;
     uint8_t pixels[rowbytes*height];
     for (int py = 0; py < height; ++py) {
         uint8_t *pixel = pixels + py * rowbytes;
         for (int px = 0; px < width; ++px) {
-            float cf = 1/255.0;
-            pixel[0] = cf*255;
-            pixel[1] = cf*255;
-            pixel[2] = cf*255;
-            pixel[3] = 255;
+            float cf = grey/255.0;
+            float a_srgb = linear_to_srgb(alpha);
+            pixel[0] = cf*a_srgb*255;
+            pixel[1] = cf*a_srgb*255;
+            pixel[2] = cf*a_srgb*255;
+            pixel[3] = alpha;
             pixel += 4;
         }
     }
-    test->texture = load_srgb8_a8_texture(pixels, width, height);
+    return create_srgb8_a8_texture(pixels, width, height);
 }
 
-void quadtest_render(struct quadtest *test) {
+void quadtest_render(struct quadtest *test, GLuint texture, GLuint ramp, GLfloat offset[2], GLfloat scale[2]) {
     glDisable(GL_CULL_FACE);
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glUseProgram(test->program); CHECK_GL();
     glBindVertexArray(test->vertex_array); CHECK_GL();
+    glUniform2f(test->offset_location, offset[0], offset[1]); CHECK_GL();
+    glUniform2f(test->scale_location, scale[0], scale[1]); CHECK_GL();
     glUniform1i(test->texture_location, 0); CHECK_GL();
+    glUniform1i(test->ramp_location, 1); CHECK_GL();
     glActiveTexture(GL_TEXTURE0); CHECK_GL();
-    glBindTexture(GL_TEXTURE_2D, test->texture); CHECK_GL();
+    glBindTexture(GL_TEXTURE_2D, texture); CHECK_GL();
+    glActiveTexture(GL_TEXTURE1); CHECK_GL();
+    glBindTexture(GL_TEXTURE_2D, ramp); CHECK_GL();
     // NOTE: texture must have pre-multiplied alpha
     glBlendFunc(GL_ONE,       GL_ONE); CHECK_GL();
     glBindBuffer(GL_ARRAY_BUFFER, test->vertex_buffer); CHECK_GL();
-    for (int i = 0; i < 1; ++i) {
-        glDrawArrays(GL_TRIANGLES, 0, test->vertices_count); CHECK_GL();
-    }
+    glDrawArrays(GL_TRIANGLES, 0, test->vertices_count); CHECK_GL();
 }
 
 void quadtest_teardown(struct quadtest *test) {
@@ -372,7 +369,39 @@ void quadtest_teardown(struct quadtest *test) {
     glDeleteBuffers(1, &test->vertex_buffer);
     glDeleteProgram(test->program);
     glBindVertexArray(0); CHECK_GL();
-    glDeleteTextures(1, &test->texture); CHECK_GL();
+}
+
+struct fborender {
+    GLuint texture;
+    GLuint fbo;
+    int width, height;
+};
+
+int fborender_setup(struct fborender *test, int width, int height) {
+    GLuint texture = create_srgb8_a8_texture(0, width, height);
+    GLuint fb;
+    glGenFramebuffers(1, &fb);
+    glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        fprintf(stderr, "failed create framebuffer, not complete?\n");
+        return 1;
+    }
+    test->texture = texture;
+    test->fbo = fb;
+    return 0;
+}
+
+
+void fborender_resize(struct fborender *test, int width, int height) {
+    if (test->width == width && test->height == height) return;
+    glBindTexture(GL_TEXTURE_2D, test->texture); CHECK_GL();
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB8_ALPHA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, 0); CHECK_GL();
+}
+
+void fborender_teardown(struct fborender *test) {
+    glDeleteTextures(1, &test->texture);
+    glDeleteRenderbuffers(1, &test->fbo);
 }
 
 int main(int argc, char *argv[]) {
@@ -396,7 +425,7 @@ int main(int argc, char *argv[]) {
     size_t num_default_buffers = sizeof default_buffers / sizeof default_buffers[0];
     for (int i = 0; i < num_default_buffers; ++i) {
         // XXX: odd: this says linear even if it is sRGB
-        glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, default_buffers[i], GL_FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING, &enc);
+        glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, default_buffers[i], GL_FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING, &enc); CHECK_GL();
         GLint redbits, greenbits, bluebits, alphabits;
 #if USE_GLES2
         glGetIntegerv(GL_RED_BITS, &redbits);
@@ -418,19 +447,114 @@ int main(int argc, char *argv[]) {
         glGetBooleanv(GL_FRAMEBUFFER_SRGB, &is_srgb);
         fprintf(stderr, "glGetBooleanv(GL_FRAMEBUFFER_SRGB): %d\n", is_srgb);
 #endif
+    // load a texture in sRGB with the lowest value possible
+    // (i.e. = 1, which is 0 in linear)
+    GLuint darkgrey_texture = create_srgb8_a8_texture_grey_pma(4, 4, 1, 255);
+    if (!darkgrey_texture) {
+        exit(1);
+    }
+    // for fbo rendering when we don't have sRGB framebuffer, we
+    // take linear data to sRGB via a ramp_texture
+    GLuint srgb_ramp = create_a_texture_srgb_ramp();
+    if (!srgb_ramp) {
+        exit(1);
+    }
+    struct fborender fborender;
+    XWindowAttributes gwa;
+    XGetWindowAttributes(glx.dpy, glx.win, &gwa);
+    if (fborender_setup(&fborender, gwa.width, gwa.height)) {
+        exit(1);
+    }
     if (CHECK_GL()) return 1;
+    int use_fbo = argc > 1;
+    struct quadtest quad_darkgrey;
+    quadtest_setup(glx.gl_major, &quad_darkgrey,
+        " #version 100 //\n"
+        " varying in vec2 position;"
+        " uniform vec2 offset;"
+        " uniform vec2 scale;"
+        " in vec2 uv;"
+        " varying out lowp vec2 f_uv;"
+        " void main() {"
+        "     vec4 pos;"
+        "     pos.xy = position * scale + offset;"
+        "     pos.z = 0.0;"
+        "     pos.w = 1.0;"
+        "     gl_Position = pos;"
+        "     f_uv = uv;"
+        " }",
+        " #version 100 //\n"
+        " uniform lowp sampler2D tex;"
+        " in lowp vec2 f_uv;"
+        " varying out lowp vec4 fragmentColor;"
+        " precision mediump float;"
+        " void main() {"
+        "     vec4 tx = texture2D(tex, f_uv);" // GLES3: texture
+        // NOTE: texture is assumed to be premultiplied alpha
+        "     fragmentColor = tx;"
+        " }");
+    struct quadtest quad_postprocess;
+    quadtest_setup(glx.gl_major, &quad_postprocess,
+        " #version 100 //\n"
+        " varying in vec2 position;"
+        " uniform vec2 offset;"
+        " uniform vec2 scale;"
+        " in vec2 uv;"
+        " varying out lowp vec2 f_uv;"
+        " void main() {"
+        "     vec4 pos;"
+        "     pos.xy = position * scale + offset;"
+        "     pos.z = 0.0;"
+        "     pos.w = 1.0;"
+        "     gl_Position = pos;"
+        "     f_uv = uv;"
+        " }",
+        " #version 100 //\n"
+        " uniform highp sampler2D tex;"
+        " uniform lowp sampler2D ramp;"
+        " in lowp vec2 f_uv;"
+        " varying out lowp vec4 fragmentColor;"
+        " precision mediump float;"
+        " void main() {"
+        "     vec4 tx = texture2D(tex, f_uv);" // GLES3: texture
+        // NOTE: texture is assumed to be premultiplied alpha
+        "     vec4 srgb_a = vec4(texture2D(ramp, vec2(tx.r, 0.0)).a,"
+        "                        texture2D(ramp, vec2(tx.g, 0.0)).a,"
+        "                        texture2D(ramp, vec2(tx.b, 0.0)).a,"
+        "                        tx.a);"
+        // calculation instead of ramp
+        //"     float cs;"
+        //"     float cl = tx.r;"
+        //"     if (cl < 0.0031308) cs = 12.92 * cl;"
+        //"     else cs = 1.055 * pow(cl, 0.41666) - 0.055;"
+        //"     srgb_a.rgb = vec3(cs,cs,cs);"
+        "     fragmentColor = srgb_a;"
+        " }");
     while (1) {
         XEvent xev;
         XNextEvent(glx.dpy, &xev);
-        struct quadtest quadtest;
-        quadtest_setup(glx.gl_major, &quadtest);
         if(xev.type == Expose) {
             XWindowAttributes gwa;
             XGetWindowAttributes(glx.dpy, glx.win, &gwa);
+            if (use_fbo) {
+                fborender_resize(&fborender, gwa.width, gwa.height);
+                glBindFramebuffer(GL_FRAMEBUFFER, fborender.fbo);
+            } else {
+                glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            }
+            fprintf(stderr, "w: %d h:%d\n", gwa.width, gwa.height);
             glViewport(0, 0, gwa.width, gwa.height);
             glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
             glClear(GL_COLOR_BUFFER_BIT);
-            quadtest_render(&quadtest); 
+            GLfloat offset[] = {0, 0};
+            GLfloat scale[] = {0.5, 0.5};
+            quadtest_render(&quad_darkgrey, darkgrey_texture, 0, offset, scale);
+            if (use_fbo) {
+                GLfloat offset[] = {0, 0};
+                GLfloat scale[] = {1, 1};
+                glBindFramebuffer(GL_FRAMEBUFFER, 0);
+                quadtest_render(&quad_postprocess, fborender.texture, srgb_ramp, offset, scale);
+            }
             glXSwapBuffers(glx.dpy, glx.win);
         } else if(xev.type == KeyPress) {
             glXMakeCurrent(glx.dpy, None, NULL);
@@ -439,9 +563,11 @@ int main(int argc, char *argv[]) {
             XCloseDisplay(glx.dpy);
             exit(0);
         }
-        quadtest_teardown(&quadtest);
     }
-
+    fborender_teardown(&fborender);
+    quadtest_teardown(&quad_darkgrey);
+    quadtest_teardown(&quad_postprocess);
+    glDeleteTextures(1, &darkgrey_texture); CHECK_GL();
     return 0;
 }
 

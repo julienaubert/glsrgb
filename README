@@ -26,6 +26,16 @@ To compile and run:
 - ./build_gl_srgb.sh && ./gl_srgb
 - ./build_gles_srgb.sh && ./gles_srgb
 
+To run with fbo post processing that converts linear to sRGB, add an arg:
+- ./build_gl_srgb.sh && ./gl_srgb fbo
+- ./build_gles_srgb.sh && ./gles_srgb fbo
+
+As expected in gl_srgb this does not look right
+(since we already have a working sRGB framebuffer.)
+while on gles_srgb, it looks correct
+(since the sRGB framebuffer is not working.)
+
+
 Related references:
 - https://devtalk.nvidia.com/default/topic/776591/?comment=5216390
 
